@@ -1,0 +1,15 @@
+{
+  "name": "light-dispatch-vessel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "typescript": "^5.4.0"
+  }
+}
