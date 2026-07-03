@@ -128,6 +128,7 @@ interface Template {
     resolver: string;
     config?: Record<string, unknown>;
     output_shape?: string;
+    validation?: { requiredPatterns?: string[] };
   }>;
 }
 
@@ -670,6 +671,15 @@ async function runDispatch(
       break;
     }
     const resolved = await resolveTask(endpoint, pointerType, config);
+    const reqPatterns = task.validation?.requiredPatterns;
+    if (resolved.ok && Array.isArray(reqPatterns) && reqPatterns.length > 0) {
+      const bodyStr = typeof resolved.body === "string" ? resolved.body : JSON.stringify(resolved.body ?? "");
+      const missing = reqPatterns.filter((p) => !bodyStr.includes(p));
+      if (missing.length > 0) {
+        resolved.ok = false;
+        resolved.error = `validation[requiredPatterns]: task output missing required pattern(s): ${missing.join(", ")}`;
+      }
+    }
     // Check 2b parity (ias-executor-ts engine.ts convergent-validity). fs_write
     // is delegated over HTTP, so the engine guard never sees this write — verify
     // here that a workspace-scoped `.json` artifact actually parses. Reading the
