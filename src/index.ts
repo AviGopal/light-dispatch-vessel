@@ -354,8 +354,8 @@ function resolvePath(
           // body itself IS the content object. Prefer body.value when present,
           // else the whole body — mirroring goal-host's special-case unwrap
           // for json_extracted_value plus its default pass-through.
-          if (r.body && typeof r.body === "object" && "value" in (r.body as Record<string, unknown>)) {
-            return { found: true, value: (r.body as Record<string, unknown>)["value"] };
+          if (r.body && typeof r.body === "object" && ("value" in (r.body as Record<string, unknown>) || "text" in (r.body as Record<string, unknown>))) {
+            return { found: true, value: "value" in (r.body as Record<string, unknown>) ? (r.body as Record<string, unknown>)["value"] : (r.body as Record<string, unknown>)["text"] };
           }
           return { found: true, value: r.body };
         }
