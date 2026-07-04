@@ -544,6 +544,20 @@ async function resolveTask(
   }
 }
 
+const TRANSIENT_ERROR_RE = /aborted|socket connection was closed|timed out|ECONNRESET|ECONNREFUSED|fetch failed/i;
+async function resolveTaskWithRetry(
+  endpoint: string,
+  resolverShape: string,
+  config: Record<string, unknown>,
+): Promise<{ ok: boolean; body?: unknown; shape?: string; error?: string }> {
+  let last: { ok: boolean; body?: unknown; shape?: string; error?: string } = { ok: false, error: "unreached" };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    last = await resolveTask(endpoint, resolverShape, config);
+    if (last.ok || !TRANSIENT_ERROR_RE.test(last.error ?? "")) return last;
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+  }
+  return last;
+}
 async function postTrace(trace: Record<string, unknown>): Promise<void> {
   try {
     const ctrl = new AbortController();
@@ -670,7 +684,7 @@ async function runDispatch(
       // Fail fast; downstream tasks usually depend on this one.
       break;
     }
-    const resolved = await resolveTask(endpoint, pointerType, config);
+    const resolved = await resolveTaskWithRetry(endpoint, pointerType, config);
     const reqPatterns = task.validation?.requiredPatterns;
     if (resolved.ok && Array.isArray(reqPatterns) && reqPatterns.length > 0) {
       const bodyStr = typeof resolved.body === "string" ? resolved.body : JSON.stringify(resolved.body ?? "");
