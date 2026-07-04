@@ -771,7 +771,11 @@ async function runDispatch(
   // explicit success bool AND status:"completed" on the success path so the
   // downstream row's success/status fields match light-dispatch's own view of
   // the trace. (Bootstrap 3.)
-  const trace = {
+  const failedTask = taskRecords.find((t) => t["success"] === false);
+        const failedTaskError = failedTask
+          ? `${String(failedTask["id"])}: ${String(failedTask["error"] ?? "unknown error")}`.slice(0, 500)
+          : undefined;
+        const trace = {
     execution_id: executionId,
     template_id: templateId,
     activity_id: templateId,
@@ -801,6 +805,7 @@ async function runDispatch(
     parent_execution_id: parentExecutionId,
     composition_chain: compositionChain,
     output_impulse_shapes: Array.from(new Set(outputShapesProduced)),
+          ...(failedTask ? { error_message: failedTaskError, failed_task_id: String(failedTask["id"]) } : {}),
   };
   await postTrace(trace);
 
