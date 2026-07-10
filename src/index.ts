@@ -603,6 +603,7 @@ async function runDispatch(
       activity_id: templateId,
       activity_variant_id: templateId,
       status: "failed" as const,
+      failure_mode: { type: "cascading", reason: "template_not_found", context: { template_id: templateId, dispatch_id: dispatchId } },
       started_at: startedAt,
       duration_ms: Date.now() - t0,
       tasks: [],
@@ -786,16 +787,21 @@ async function runDispatch(
   // downstream row's success/status fields match light-dispatch's own view of
   // the trace. (Bootstrap 3.)
   const failedTask = taskRecords.find((t) => t["success"] === false);
-        const failedTaskError = failedTask
+    const failedTaskError = failedTask
           ? `${String(failedTask["id"])}: ${String(failedTask["error"] ?? "unknown error")}`.slice(0, 500)
           : undefined;
+    const failureReason = String(failedTask?.["error"] ?? "unknown dispatch failure").slice(0, 500);
+    const failureType = /convergent_validity|structuredError|validation|verifier|rejected/i.test(failureReason) ? "verifier_negative" : "cascading";
+    const failure_mode = overallStatus === "success" ? null : { type: failureType, reason: failureReason, context: { task_id: failedTask?.["id"] ?? null, resolver_id: failedTask?.["resolver_id"] ?? null, dispatch_id: dispatchId, template_id: templateId } };
         const trace = {
+    id: dispatchId,
     execution_id: executionId,
     template_id: templateId,
     activity_id: templateId,
     activity_variant_id: templateId,
     status: overallStatus === "success" ? ("completed" as const) : ("failed" as const),
     success: overallStatus === "success",
+    failure_mode,
     started_at: startedAt,
     duration_ms: duration,
     tasks: taskRecords,
