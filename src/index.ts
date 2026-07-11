@@ -142,6 +142,8 @@ interface TaskResult {
   error?: string;
   /** raw body returned from resolving vessel — only kept long enough to persist + extract referenced fields. */
   body?: unknown;
+  /** true when the task was skipped due to a non-fatal condition (e.g. optional resolver not found) */
+  skipped_non_fatal?: true;
 }
 
 interface DispatchOutcome {
@@ -758,10 +760,18 @@ async function runDispatch(
     try {
       await writeFile(join(workDir, `task-${i}-${task.id}.json`), JSON.stringify(r, null, 2));
     } catch { /* swallow */ }
-    if (r.status === "failure") break; // chain halts on first failure
+    const isNonFatal = !!(task as Record<string, unknown>)["non_fatal"] || !!(rawConfig["non_fatal"]);
+    if (r.status === "failure") {
+      if (isNonFatal) {
+        taskRecords[taskRecords.length - 1] = { ...taskRecords[taskRecords.length - 1], skipped_non_fatal: true };
+        continue;
+      }
+      break; // chain halts on first fatal failure
+    }
   }
 
-  const overallStatus: "success" | "failure" = failureCount === 0 ? "success" : "failure";
+  const taskResults = Array.from(priorResults.values());
+  const overallStatus: "success" | "failure" = taskResults.every(r => r.status === "success" || (r as unknown as Record<string, unknown>)["skipped_non_fatal"] === true) ? "success" : "failure";
   const duration = Date.now() - t0;
   // Information yield: scan every task body for findings the detector reported.
   // A clean completion that produced no findings is "idle" (reduced reward),
