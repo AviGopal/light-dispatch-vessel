@@ -764,6 +764,7 @@ async function runDispatch(
     const isNonFatal = !!(task as Record<string, unknown>)["non_fatal"] || !!(rawConfig["non_fatal"]);
     if (r.status === "failure") {
       if (isNonFatal) {
+          r['skipped_non_fatal'] = true;
         const taskIdx = taskRecords.length - 1;
               taskRecords[taskIdx]!.skipped_non_fatal = true;
               skippedNonFatalIds.add(task.id);
