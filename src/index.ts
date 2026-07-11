@@ -639,6 +639,7 @@ async function runDispatch(
 
   const priorResults = new Map<string, TaskResult>();
   const taskRecords: Array<Record<string, unknown>> = [];
+  const skippedNonFatalIds = new Set<string>();
   let successCount = 0;
   let failureCount = 0;
   // V31 (2026-06-14): accumulate the second cost dimension — cost-weighted LLM
@@ -763,15 +764,17 @@ async function runDispatch(
     const isNonFatal = !!(task as Record<string, unknown>)["non_fatal"] || !!(rawConfig["non_fatal"]);
     if (r.status === "failure") {
       if (isNonFatal) {
-        taskRecords[taskRecords.length - 1] = { ...taskRecords[taskRecords.length - 1], skipped_non_fatal: true };
+        const taskIdx = taskRecords.length - 1;
+              taskRecords[taskIdx]!.skipped_non_fatal = true;
+              skippedNonFatalIds.add(task.id);
+              if (priorResults.get(task.id)) { (priorResults.get(task.id) as unknown as Record<string, unknown>)['skipped_non_fatal'] = true; }
         continue;
       }
       break; // chain halts on first fatal failure
     }
   }
 
-  const taskResults = Array.from(priorResults.values());
-  const overallStatus: "success" | "failure" = taskResults.every(r => r.status === "success" || (r as unknown as Record<string, unknown>)["skipped_non_fatal"] === true) ? "success" : "failure";
+  const overallStatus: "success" | "failure" = taskRecords.some(r => r["success"] === false && !r["skipped_non_fatal"]) ? "failure" : "success";
   const duration = Date.now() - t0;
   // Information yield: scan every task body for findings the detector reported.
   // A clean completion that produced no findings is "idle" (reduced reward),
@@ -797,7 +800,7 @@ async function runDispatch(
   // explicit success bool AND status:"completed" on the success path so the
   // downstream row's success/status fields match light-dispatch's own view of
   // the trace. (Bootstrap 3.)
-  const failedTask = taskRecords.find((t) => t["success"] === false);
+  const failedTask = taskRecords.find((t) => t["success"] === false && !t["skipped_non_fatal"]);
     const failedTaskError = failedTask
           ? `${String(failedTask["id"])}: ${String(failedTask["error"] ?? "unknown error")}`.slice(0, 500)
           : undefined;
