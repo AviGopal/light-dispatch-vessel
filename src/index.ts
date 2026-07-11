@@ -85,6 +85,7 @@ const DISCOVERY = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
 const API_KEY = process.env["METABOB_API_KEY"] ?? "";
 const VERSION = "0.1.0";
 const WORKDIR_ROOT = process.env["LIGHT_DISPATCH_WORKDIR"] ?? "/workspace/light-dispatch";
+let dispatchCount = 0;
 
 // Artifact retention. Per-dispatch task-*.json artifacts are ephemeral debug
 // state — the durable record is the SurrealDB trace. Left uncleaned they
@@ -868,7 +869,15 @@ const server = Bun.serve({
       return Response.json({ shapes: SHAPES });
     }
 
-    if (req.method === "POST" && url.pathname === "/dispatch") {
+    if (url.pathname === "/stats" && req.method === "GET") {
+      return new Response(JSON.stringify({ dispatch_count: dispatchCount }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (url.pathname === "/dispatch" && req.method === "POST") {
+      dispatchCount++;
       let body: Record<string, unknown>;
       try {
         const parsed = await req.json();
