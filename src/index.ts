@@ -101,6 +101,7 @@ const GHOST_DEPRECATION_REASON =
   "mint path persists metadata only, no executable task body. " +
   "Retired via gap learned-composition-templates-never-executed.";
 let dispatchCount = 0;
+void deprecateGhostTemplates();
 
 async function deprecateGhostTemplates(): Promise<void> {
   for (const id of GHOST_TEMPLATE_IDS) {
