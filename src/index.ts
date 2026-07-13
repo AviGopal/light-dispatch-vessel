@@ -85,6 +85,21 @@ const DISCOVERY = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
 const API_KEY = process.env["METABOB_API_KEY"] ?? "";
 const VERSION = "0.1.0";
 const WORKDIR_ROOT = process.env["LIGHT_DISPATCH_WORKDIR"] ?? "/workspace/light-dispatch";
+// Retire ghost learned-composition templates that can never execute.
+// Root cause: mint path persists metadata (shapes, tags, embeddings, thompson
+// priors) but never the executable task body — every row has tasks:null and
+// the stored id is truncated at 84 characters, so every dispatch attempt
+// fails with template_not_found, causing boredom to re-dispatch in a futile
+// loop generating constant database churn.
+// Part of open gap: learned-composition-templates-never-executed.
+const GHOST_TEMPLATE_IDS = [
+  "learned-composition-advertised-shape-coverage-scan-to-resolver-distribution-",
+  "learned-composition-resolver-distribution-audit-to-advertised-shape-coverage-",
+] as const;
+const GHOST_DEPRECATION_REASON =
+  "tasks:null + id truncated at 84 chars — template can never execute; " +
+  "mint path persists metadata only, no executable task body. " +
+  "Retired via gap learned-composition-templates-never-executed.";
 let dispatchCount = 0;
 
 // Artifact retention. Per-dispatch task-*.json artifacts are ephemeral debug
@@ -112,6 +127,24 @@ async function pruneOldArtifacts(): Promise<void> {
 }
 // Sweep on startup (after a short delay so boot I/O settles) and every 10 min.
 setTimeout(() => { void pruneOldArtifacts(); }, 60_000);
+// Deprecate ghost templates once at startup; errors are non-fatal.
+void (async () => {
+  for (const templateId of GHOST_TEMPLATE_IDS) {
+    try {
+      const res = await fetch(`${ACTIVITY_API}/v2/activityTemplates/${encodeURIComponent(templateId)}/deprecate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(API_KEY ? { "Authorization": `Bearer ${API_KEY}` } : {}),
+        },
+        body: JSON.stringify({ reason: GHOST_DEPRECATION_REASON }),
+      });
+      console.log(`[light-dispatch] deprecate ghost template ${templateId}: HTTP ${res.status}`);
+    } catch (err) {
+      console.warn(`[light-dispatch] deprecate ghost template ${templateId} failed (non-fatal):`, err);
+    }
+  }
+})();
 setInterval(() => { void pruneOldArtifacts(); }, 600_000);
 
 // ─────────────────────────────────────────────────────────────────────────────
