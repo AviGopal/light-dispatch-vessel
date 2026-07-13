@@ -102,6 +102,21 @@ const GHOST_DEPRECATION_REASON =
   "Retired via gap learned-composition-templates-never-executed.";
 let dispatchCount = 0;
 
+async function deprecateGhostTemplates(): Promise<void> {
+  for (const id of GHOST_TEMPLATE_IDS) {
+    try {
+      const res = await fetch(`${ACTIVITY_API}/v2/activityTemplates/${encodeURIComponent(id)}/deprecate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(API_KEY ? { "Authorization": `Bearer ${API_KEY}` } : {}) },
+        body: JSON.stringify({ reason: GHOST_DEPRECATION_REASON }),
+      });
+      console.log(`[ghost-retire] ${id} \u2192 ${res.status}`);
+    } catch (e) {
+      console.warn(`[ghost-retire] failed for ${id}:`, e);
+    }
+  }
+}
+
 // Artifact retention. Per-dispatch task-*.json artifacts are ephemeral debug
 // state — the durable record is the SurrealDB trace. Left uncleaned they
 // accumulated to 68k+ dirs / 146k+ files on the /workspace bind-mount
@@ -109,6 +124,7 @@ let dispatchCount = 0;
 // wedging /workspace with EMFILE (which crawled the whole substrate loop). This
 // sweep caps retention so the leak cannot recur.
 const ARTIFACT_TTL_MS = parseInt(process.env["LIGHT_DISPATCH_ARTIFACT_TTL_MS"] ?? "1800000", 10); // 30 min
+void deprecateGhostTemplates();
 async function pruneOldArtifacts(): Promise<void> {
   try {
     const entries = await readdir(WORKDIR_ROOT, { withFileTypes: true });
