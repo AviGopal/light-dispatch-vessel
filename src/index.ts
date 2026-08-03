@@ -847,7 +847,7 @@ async function runDispatch(
     overallStatus !== "success" ? "error" : findingsCount > 0 ? "productive" : "idle";
   // activity-api's POST /v2/activities/execution-traces derives `success` via
   // `body.status === 'completed' || body.success === true` (see
-  // metabob-activity-api/src/routes/execution-traces.ts:1561). Send BOTH the
+  // activity-api/src/routes/execution-traces.ts:1561). Send BOTH the
   // explicit success bool AND status:"completed" on the success path so the
   // downstream row's success/status fields match light-dispatch's own view of
   // the trace. (Bootstrap 3.)
