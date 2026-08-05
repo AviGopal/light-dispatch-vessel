@@ -113,7 +113,7 @@ const WORKDIR_ROOT = process.env["LIGHT_DISPATCH_WORKDIR"] ?? "/workspace/light-
 // and shown none.
 const RETIRE_MIN_SAMPLES = parseInt(process.env["LIGHT_DISPATCH_RETIRE_MIN_SAMPLES"] ?? "10", 10);
 const RETIRE_MAX_PER_SWEEP = parseInt(process.env["LIGHT_DISPATCH_RETIRE_MAX_PER_SWEEP"] ?? "25", 10);
-const RETIRE_WINDOW = parseInt(process.env["LIGHT_DISPATCH_RETIRE_WINDOW"] ?? "2000", 10);
+const RETIRE_WINDOW = parseInt(process.env["LIGHT_DISPATCH_RETIRE_WINDOW"] ?? "10000", 10);
 
 interface TemplateMetrics { id?: string; total_executions?: number; success_rate?: number; thompson_alpha?: number; thompson_beta?: number }
 
