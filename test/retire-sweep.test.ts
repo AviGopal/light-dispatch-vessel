@@ -16,33 +16,46 @@ const T = (metrics: Record<string, unknown> | undefined, retired = false) => ({ 
 
 describe("shouldRetire", () => {
   it("retires an arm with enough samples and no successes", () => {
-    expect(shouldRetire(T({ total_executions: 137, success_rate: 0 }), 10)).toBe(true);
+    expect(shouldRetire(T({ total_executions: 137, successful_executions: 0, success_rate: 0 }), 10)).toBe(true);
   });
 
   it("KEEPS an arm that has ever succeeded, however rarely", () => {
-    expect(shouldRetire(T({ total_executions: 500, success_rate: 0.002 }), 10)).toBe(false);
+    expect(shouldRetire(T({ total_executions: 500, successful_executions: 1, success_rate: 0.002 }), 10)).toBe(false);
+  });
+
+  // THE NEAR-MISS THIS RULE EXISTS FOR. `success_rate` is derived and it LIES: measured
+  // 2026-08-05, 398 rows reported success_rate === 0 while successful_executions was > 0 —
+  // validator-dispatch reported success_rate 0 on 67,855 successes out of 1,131,085 runs.
+  // Keying on the rate retired 21 arms that were doing real work.
+  it("KEEPS an arm whose success_rate reads 0 but which HAS successes", () => {
+    expect(shouldRetire(T({ total_executions: 1131085, successful_executions: 67855, success_rate: 0 }), 10)).toBe(false);
+  });
+
+  // A missing counter must never authorize a retirement.
+  it("KEEPS an arm that does not report successful_executions at all", () => {
+    expect(shouldRetire(T({ total_executions: 500, success_rate: 0 }), 10)).toBe(false);
   });
 
   it("KEEPS an arm that is merely new — too few samples to have shown a success", () => {
-    expect(shouldRetire(T({ total_executions: 9, success_rate: 0 }), 10)).toBe(false);
+    expect(shouldRetire(T({ total_executions: 9, successful_executions: 0, success_rate: 0 }), 10)).toBe(false);
   });
 
   // Fail safe. A metrics outage must not read as "every arm is dead".
   it("KEEPS an arm whose metrics are missing or malformed", () => {
     expect(shouldRetire(T(undefined), 10)).toBe(false);
     expect(shouldRetire(T({}), 10)).toBe(false);
-    expect(shouldRetire(T({ total_executions: 100 }), 10)).toBe(false);          // no success_rate
-    expect(shouldRetire(T({ success_rate: 0 }), 10)).toBe(false);                // no execution count
+    expect(shouldRetire(T({ total_executions: 100 }), 10)).toBe(false);          // no success counter
+    expect(shouldRetire(T({ successful_executions: 0 }), 10)).toBe(false);       // no execution count
   });
 
   it("KEEPS an already-RETIRED arm, so a sweep is idempotent", () => {
-    expect(shouldRetire(T({ total_executions: 137, success_rate: 0 }, true), 10)).toBe(false);
+    expect(shouldRetire(T({ total_executions: 137, successful_executions: 0, success_rate: 0 }, true), 10)).toBe(false);
   });
 
   // `retired` is the operative flag; `deprecated` is only the label. An arm marked deprecated
   // but NOT retired is still in the candidate pool, so the sweep must still act on it —
   // guarding on `deprecated` would have abandoned precisely the arms that needed retiring.
   it("still retires an arm that is deprecated but NOT retired", () => {
-    expect(shouldRetire({ deprecated: true, retired: false, metrics: { total_executions: 137, success_rate: 0 } as never }, 10)).toBe(true);
+    expect(shouldRetire({ deprecated: true, retired: false, metrics: { total_executions: 137, successful_executions: 0, success_rate: 0 } as never }, 10)).toBe(true);
   });
 });

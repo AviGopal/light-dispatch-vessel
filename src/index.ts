@@ -115,7 +115,7 @@ const RETIRE_MIN_SAMPLES = parseInt(process.env["LIGHT_DISPATCH_RETIRE_MIN_SAMPL
 const RETIRE_MAX_PER_SWEEP = parseInt(process.env["LIGHT_DISPATCH_RETIRE_MAX_PER_SWEEP"] ?? "25", 10);
 const RETIRE_WINDOW = parseInt(process.env["LIGHT_DISPATCH_RETIRE_WINDOW"] ?? "10000", 10);
 
-interface TemplateMetrics { id?: string; total_executions?: number; success_rate?: number; thompson_alpha?: number; thompson_beta?: number }
+interface TemplateMetrics { id?: string; total_executions?: number; successful_executions?: number; success_rate?: number; thompson_alpha?: number; thompson_beta?: number }
 
 /**
  * Retire iff the arm has been observed ENOUGH and has never once succeeded.
@@ -135,7 +135,18 @@ export function shouldRetire(t: { deprecated?: boolean; retired?: boolean; metri
   // started setting both flags together.
   if (t.retired) return false;
   if ((m.total_executions ?? 0) < minSamples) return false;   // too new to judge
-  return (m.success_rate ?? 1) === 0;                          // never once succeeded
+  // Count SUCCESSES, never the rate. `success_rate` is a derived field and it lies: measured
+  // 2026-08-05, 398 rows reported success_rate === 0 while successful_executions was > 0 —
+  // `validator-dispatch` reported success_rate 0 on 67,855 successes out of 1,131,085 runs.
+  // Keying on the rate turned "the rate is miscomputed" into "this arm has never worked" and
+  // retired 21 arms that were doing real work, including auto-bridge-obsidian:ui_view (95
+  // successes) and development-vessel:draft-gap-closing-activity (42). Using the raw count
+  // narrows the true candidate set from 261 to 13.
+  //
+  // Requiring the field to be PRESENT is deliberate: `?? 1` means a row that does not report
+  // successful_executions at all is treated as having succeeded, so a missing counter can never
+  // authorize a retirement. Only an explicit, observed zero does.
+  return (m.successful_executions ?? 1) === 0;
 }
 
 async function retireNeverSucceededTemplates(): Promise<void> {
