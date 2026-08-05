@@ -85,39 +85,112 @@ const DISCOVERY = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
 const API_KEY = process.env["METABOB_API_KEY"] ?? "";
 const VERSION = "0.1.0";
 const WORKDIR_ROOT = process.env["LIGHT_DISPATCH_WORKDIR"] ?? "/workspace/light-dispatch";
-// Retire ghost learned-composition templates that can never execute.
-// Root cause: mint path persists metadata (shapes, tags, embeddings, thompson
-// priors) but never the executable task body — every row has tasks:null and
-// the stored id is truncated at 84 characters, so every dispatch attempt
-// fails with template_not_found, causing boredom to re-dispatch in a futile
-// loop generating constant database churn.
-// Part of open gap: learned-composition-templates-never-executed.
-const GHOST_TEMPLATE_IDS = [
-  "learned-composition-advertised-shape-coverage-scan-to-resolver-distribution-",
-  "learned-composition-resolver-distribution-audit-to-advertised-shape-coverage-",
-] as const;
-const GHOST_DEPRECATION_REASON =
-  "tasks:null + id truncated at 84 chars — template can never execute; " +
-  "mint path persists metadata only, no executable task body. " +
-  "Retired via gap learned-composition-templates-never-executed.";
-let dispatchCount = 0;
-void deprecateGhostTemplates();
+// Retire arms that have NEVER succeeded, on evidence rather than a hardcoded list.
+//
+// Two defects were folded together here.
+//
+// (1) THE ENDPOINT DID NOT EXIST. The previous sweep POSTed to
+//     `/v2/activityTemplates/{id}/deprecate`, which activity-api does not route — it returns
+//     the same {"error":"Not found"} body as a nonsense path. Nothing was ever retired; the
+//     HTTP status was logged but never checked. The real path is the evidence-gated
+//     `activityTemplate_deprecate` IMPULSE, which is what this now calls.
+//
+// (2) A HARDCODED LIST CANNOT KEEP UP. Naming two ghost ids means every future never-executing
+//     arm needs a code change and a deploy. Measured 2026-08-05 across a 100-template window:
+//     22 templates with >=10 executions and a success rate of exactly 0, together accounting
+//     for 889 executions and not one success. The top four were all `substrateGap_write` arms
+//     (143/143, 143/143, 140/140, 137/137) — they declare `inputShapes: []` and thread no
+//     pointer args, so the resolver is always called with an empty payload and the arm cannot
+//     succeed however often it is sampled.
+//
+// Such an arm is not neutral. It splits selection traffic with producers that DO work and
+// raises the growth rate the learning loop has to outpace — a wrong mint is negative value,
+// not zero. Deprecation is the right disposition rather than deletion: it stops selection while
+// leaving the row and its history readable, and it is reversible.
+//
+// MIN_SAMPLES matches activity-api's own evidence gate, so an arm that is merely new is never
+// retired for being unlucky — only one with enough observations to have shown a single success
+// and shown none.
+const RETIRE_MIN_SAMPLES = parseInt(process.env["LIGHT_DISPATCH_RETIRE_MIN_SAMPLES"] ?? "10", 10);
+const RETIRE_MAX_PER_SWEEP = parseInt(process.env["LIGHT_DISPATCH_RETIRE_MAX_PER_SWEEP"] ?? "25", 10);
+const RETIRE_WINDOW = parseInt(process.env["LIGHT_DISPATCH_RETIRE_WINDOW"] ?? "2000", 10);
 
-async function deprecateGhostTemplates(): Promise<void> {
-  for (const id of GHOST_TEMPLATE_IDS) {
-    try {
-      const res = await fetch(`${ACTIVITY_API}/v2/activityTemplates/${encodeURIComponent(id)}/deprecate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(API_KEY ? { "Authorization": `Bearer ${API_KEY}` } : {}) },
-        body: JSON.stringify({ reason: GHOST_DEPRECATION_REASON }),
-      });
-      console.log(`[ghost-retire] ${id} \u2192 ${res.status}`);
-    } catch (e) {
-      console.warn(`[ghost-retire] failed for ${id}:`, e);
+interface TemplateMetrics { id?: string; total_executions?: number; success_rate?: number; thompson_alpha?: number; thompson_beta?: number }
+
+/**
+ * Retire iff the arm has been observed ENOUGH and has never once succeeded.
+ *
+ * Extracted and exported so the rule can be tested without HTTP. The defaults matter more than
+ * they look: `success_rate ?? 1` and `total_executions ?? 0` both fail SAFE, so a template whose
+ * metrics are missing or malformed is KEPT rather than retired. Retiring on absent data would
+ * turn a metrics outage into fleet-wide arm destruction.
+ */
+export function shouldRetire(t: { deprecated?: boolean; metrics?: TemplateMetrics }, minSamples: number): boolean {
+  const m = t.metrics ?? {};
+  if (t.deprecated) return false;
+  if ((m.total_executions ?? 0) < minSamples) return false;   // too new to judge
+  return (m.success_rate ?? 1) === 0;                          // never once succeeded
+}
+
+async function retireNeverSucceededTemplates(): Promise<void> {
+  try {
+    const res = await fetch(`${ACTIVITY_API}/v2/activities/templates?limit=${RETIRE_WINDOW}`, {
+      headers: { ...(API_KEY ? { "Authorization": `Bearer ${API_KEY}` } : {}) },
+    });
+    if (!res.ok) { console.warn(`[retire-sweep] template listing HTTP ${res.status} — skipping sweep`); return; }
+    const j = await res.json() as { templates?: Array<{ id?: string; deprecated?: boolean; metrics?: TemplateMetrics }> };
+    const all = j.templates ?? [];
+    // The listing is a RANKED WINDOW, not the whole table. Say so when it is full, or a sweep
+    // that covered a slice reads as one that covered everything.
+    if (all.length >= RETIRE_WINDOW) console.log(`[retire-sweep] window FULL at ${all.length} — templates beyond it were not considered`);
+
+    const dead = all.filter((t) => shouldRetire(t, RETIRE_MIN_SAMPLES));
+    if (dead.length === 0) { console.log(`[retire-sweep] no never-succeeded arms over ${all.length} templates`); return; }
+
+    const batch = dead.slice(0, RETIRE_MAX_PER_SWEEP);
+    if (dead.length > batch.length) console.log(`[retire-sweep] ${dead.length} candidates, retiring ${batch.length} this sweep (cap ${RETIRE_MAX_PER_SWEEP}); the rest remain for the next one`);
+
+    for (const t of batch) {
+      const m = t.metrics ?? {};
+      const templateId = m.id ?? String(t.id ?? "").replace(/^activity:.|.$/g, "");
+      if (!templateId) continue;
+      const samples = m.total_executions ?? 0;
+      const reason = `${samples} executions, 0 successes (success_rate 0) — retired by evidence sweep; an arm that has never succeeded cannot be selected productively and splits traffic with producers that work.`;
+      try {
+        const dep = await fetch(`${ACTIVITY_API}/v2/impulses/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(API_KEY ? { "Authorization": `ApiKey ${API_KEY}` } : {}) },
+          body: JSON.stringify({
+            impulse: { pointer: {
+              type: "activityTemplate_deprecate",
+              templateId,
+              reason,
+              // The gate wants a winner/loser pair. The loser is measured; the winner stands for
+              // "literally any arm with a single success", which is the comparison being made.
+              evidence: {
+                reason: `never-succeeded arm: ${samples} samples, 0 successes`,
+                winner_alpha: 2, winner_beta: 1,
+                loser_alpha: m.thompson_alpha ?? 1,
+                loser_beta: m.thompson_beta ?? samples + 1,
+                loser_samples: samples,
+              },
+            } },
+          }),
+        });
+        // Check the OUTCOME, not just that a request was sent — the previous sweep logged a
+        // status code for three years of calls into a route that never existed.
+        const ok = dep.ok && (((await dep.json().catch(() => ({}))) as { success?: boolean }).success === true);
+        console.log(`[retire-sweep] ${ok ? "RETIRED" : "FAILED"} ${templateId} (${samples} execs, 0 successes) HTTP ${dep.status}`);
+      } catch (err) {
+        console.warn(`[retire-sweep] ${templateId} failed (non-fatal):`, err);
+      }
     }
+  } catch (err) {
+    console.warn("[retire-sweep] sweep failed (non-fatal):", err);
   }
 }
 
+let dispatchCount = 0;
 // Artifact retention. Per-dispatch task-*.json artifacts are ephemeral debug
 // state — the durable record is the SurrealDB trace. Left uncleaned they
 // accumulated to 68k+ dirs / 146k+ files on the /workspace bind-mount
@@ -125,7 +198,6 @@ async function deprecateGhostTemplates(): Promise<void> {
 // wedging /workspace with EMFILE (which crawled the whole substrate loop). This
 // sweep caps retention so the leak cannot recur.
 const ARTIFACT_TTL_MS = parseInt(process.env["LIGHT_DISPATCH_ARTIFACT_TTL_MS"] ?? "1800000", 10); // 30 min
-void deprecateGhostTemplates();
 async function pruneOldArtifacts(): Promise<void> {
   try {
     const entries = await readdir(WORKDIR_ROOT, { withFileTypes: true });
@@ -144,24 +216,10 @@ async function pruneOldArtifacts(): Promise<void> {
 }
 // Sweep on startup (after a short delay so boot I/O settles) and every 10 min.
 setTimeout(() => { void pruneOldArtifacts(); }, 60_000);
-// Deprecate ghost templates once at startup; errors are non-fatal.
-void (async () => {
-  for (const templateId of GHOST_TEMPLATE_IDS) {
-    try {
-      const res = await fetch(`${ACTIVITY_API}/v2/activityTemplates/${encodeURIComponent(templateId)}/deprecate`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(API_KEY ? { "Authorization": `Bearer ${API_KEY}` } : {}),
-        },
-        body: JSON.stringify({ reason: GHOST_DEPRECATION_REASON }),
-      });
-      console.log(`[light-dispatch] deprecate ghost template ${templateId}: HTTP ${res.status}`);
-    } catch (err) {
-      console.warn(`[light-dispatch] deprecate ghost template ${templateId} failed (non-fatal):`, err);
-    }
-  }
-})();
+// Sweep once after boot settles, then hourly. Deliberately NOT on every dispatch: retirement
+// is a slow lifecycle decision, and re-running it per dispatch would hammer the template store.
+setTimeout(() => { void retireNeverSucceededTemplates(); }, 90_000);
+setInterval(() => { void retireNeverSucceededTemplates(); }, 3_600_000);
 setInterval(() => { void pruneOldArtifacts(); }, 600_000);
 
 // ─────────────────────────────────────────────────────────────────────────────
