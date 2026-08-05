@@ -125,9 +125,15 @@ interface TemplateMetrics { id?: string; total_executions?: number; success_rate
  * metrics are missing or malformed is KEPT rather than retired. Retiring on absent data would
  * turn a metrics outage into fleet-wide arm destruction.
  */
-export function shouldRetire(t: { deprecated?: boolean; metrics?: TemplateMetrics }, minSamples: number): boolean {
+export function shouldRetire(t: { deprecated?: boolean; retired?: boolean; metrics?: TemplateMetrics }, minSamples: number): boolean {
   const m = t.metrics ?? {};
-  if (t.deprecated) return false;
+  // Skip on `retired`, NOT on `deprecated`. `retired` is the operative flag — Thompson candidate
+  // assembly, shape discovery and the template listing all filter on it, while `deprecated` is
+  // only the lifecycle label. An arm marked deprecated but not retired is still being SELECTED,
+  // so it still needs the sweep. Guarding on `deprecated` would have silently abandoned exactly
+  // the arms that most needed retiring: the 18 deprecated on 2026-08-05 before activity-api
+  // started setting both flags together.
+  if (t.retired) return false;
   if ((m.total_executions ?? 0) < minSamples) return false;   // too new to judge
   return (m.success_rate ?? 1) === 0;                          // never once succeeded
 }

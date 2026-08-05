@@ -12,7 +12,7 @@
 import { describe, expect, it } from "bun:test";
 import { shouldRetire } from "../src/index.js";
 
-const T = (metrics: Record<string, unknown> | undefined, deprecated = false) => ({ deprecated, metrics: metrics as never });
+const T = (metrics: Record<string, unknown> | undefined, retired = false) => ({ retired, metrics: metrics as never });
 
 describe("shouldRetire", () => {
   it("retires an arm with enough samples and no successes", () => {
@@ -35,7 +35,14 @@ describe("shouldRetire", () => {
     expect(shouldRetire(T({ success_rate: 0 }), 10)).toBe(false);                // no execution count
   });
 
-  it("KEEPS an already-deprecated arm, so a sweep is idempotent", () => {
+  it("KEEPS an already-RETIRED arm, so a sweep is idempotent", () => {
     expect(shouldRetire(T({ total_executions: 137, success_rate: 0 }, true), 10)).toBe(false);
+  });
+
+  // `retired` is the operative flag; `deprecated` is only the label. An arm marked deprecated
+  // but NOT retired is still in the candidate pool, so the sweep must still act on it —
+  // guarding on `deprecated` would have abandoned precisely the arms that needed retiring.
+  it("still retires an arm that is deprecated but NOT retired", () => {
+    expect(shouldRetire({ deprecated: true, retired: false, metrics: { total_executions: 137, success_rate: 0 } as never }, 10)).toBe(true);
   });
 });
