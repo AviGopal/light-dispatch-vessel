@@ -140,15 +140,33 @@ export function shouldRetire(t: { deprecated?: boolean; retired?: boolean; metri
 
 async function retireNeverSucceededTemplates(): Promise<void> {
   try {
-    const res = await fetch(`${ACTIVITY_API}/v2/activities/templates?limit=${RETIRE_WINDOW}`, {
-      headers: { ...(API_KEY ? { "Authorization": `Bearer ${API_KEY}` } : {}) },
-    });
-    if (!res.ok) { console.warn(`[retire-sweep] template listing HTTP ${res.status} — skipping sweep`); return; }
-    const j = await res.json() as { templates?: Array<{ id?: string; deprecated?: boolean; metrics?: TemplateMetrics }> };
-    const all = j.templates ?? [];
-    // The listing is a RANKED WINDOW, not the whole table. Say so when it is full, or a sweep
-    // that covered a slice reads as one that covered everything.
-    if (all.length >= RETIRE_WINDOW) console.log(`[retire-sweep] window FULL at ${all.length} — templates beyond it were not considered`);
+    // PAGINATE. The listing CLAMPS `limit` to 100 regardless of what is requested — asking for
+    // 2000 returns 100 with `limit: 100` in the response while `total` reports 2429. A single
+    // request therefore sweeps ~4% of the fleet and, without reading `total`, reports as though
+    // it swept all of it. That is the silent-cap failure this sweep is supposed to avoid, so the
+    // bound has to come from the RESPONSE (`total` and the returned count), never from the limit
+    // we asked for.
+    const all: Array<{ id?: string; deprecated?: boolean; retired?: boolean; metrics?: TemplateMetrics }> = [];
+    let offset = 0;
+    let total = Infinity;
+    while (all.length < total && offset < RETIRE_WINDOW) {
+      const res = await fetch(`${ACTIVITY_API}/v2/activities/templates?limit=200&offset=${offset}`, {
+        headers: { ...(API_KEY ? { "Authorization": `Bearer ${API_KEY}` } : {}) },
+      });
+      if (!res.ok) { console.warn(`[retire-sweep] template listing HTTP ${res.status} at offset ${offset} — sweeping only what was fetched`); break; }
+      const page = await res.json() as { templates?: Array<{ id?: string; deprecated?: boolean; retired?: boolean; metrics?: TemplateMetrics }>; total?: number };
+      const rows = page.templates ?? [];
+      if (typeof page.total === "number") total = page.total;
+      if (rows.length === 0) break;                       // server returned nothing; stop rather than spin
+      all.push(...rows);
+      offset += rows.length;
+    }
+    // Say what was NOT covered. A sweep over a slice must never read as one over the whole set.
+    if (Number.isFinite(total) && all.length < total) {
+      console.log(`[retire-sweep] covered ${all.length}/${total} templates (cap ${RETIRE_WINDOW}) — the remainder was NOT considered this pass`);
+    } else {
+      console.log(`[retire-sweep] covered ${all.length}/${Number.isFinite(total) ? total : all.length} templates`);
+    }
 
     const dead = all.filter((t) => shouldRetire(t, RETIRE_MIN_SAMPLES));
     if (dead.length === 0) { console.log(`[retire-sweep] no never-succeeded arms over ${all.length} templates`); return; }
