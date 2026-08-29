@@ -190,7 +190,7 @@ async function retireNeverSucceededTemplates(): Promise<void> {
       const templateId = m.id ?? String(t.id ?? "").replace(/^activity:.|.$/g, "");
       if (!templateId) continue;
       const samples = m.total_executions ?? 0;
-      const reason = `${samples} executions, 0 successes (success_rate 0) — retired by evidence sweep; an arm that has never succeeded cannot be selected productively and splits traffic with producers that work.`;
+      const reason = `semantic_reject: ${samples} executions, 0 successes (success_rate 0) — retired by evidence sweep; an arm that has never succeeded cannot be selected productively and splits traffic with producers that work.`;
       try {
         const dep = await fetch(`${ACTIVITY_API}/v2/impulses/resolve`, {
           method: "POST",
