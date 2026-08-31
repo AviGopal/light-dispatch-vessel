@@ -853,7 +853,7 @@ async function runDispatch(
       const wpath = typeof config["path"] === "string" ? (config["path"] as string) : "";
       if (wpath.startsWith("/workspace/") && wpath.endsWith(".json") && !wpath.includes("{{")) {
         let okJson = false;
-        try { okJson = isParseableJsonArtifact(await readFile(wpath, "utf-8")); } catch { okJson = false; }
+        try { okJson = isParseableJsonArtifact(await readFile(wpath, "utf-8")); } catch (err) { okJson = false; resolved.error = (err as Error).message; }
         if (!okJson) {
           resolved.ok = false;
           resolved.error =
