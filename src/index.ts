@@ -987,6 +987,23 @@ async function runDispatch(
   };
   await postTrace(trace);
 
+  const declaredShapes = (tpl.tasks ?? []).flatMap((t) => {
+    const os = (t as unknown as Record<string, unknown>)["outputShapes"];
+    return Array.isArray(os) ? os.map((s) => String(s)) : [];
+  });
+  const producedShapes = new Set(outputShapesProduced);
+  const reachVerdict = overallStatus === "success" && declaredShapes.length > 0 && declaredShapes.every((s) => producedShapes.has(s));
+  try {
+    const rctrl = new AbortController();
+    const rtimer = setTimeout(() => rctrl.abort(), 5_000);
+    void fetch(`${ACTIVITY_API}/v2/activities/execution-traces/reach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth() },
+      body: JSON.stringify({ execution_id: executionId, reached: reachVerdict }),
+      signal: rctrl.signal,
+    }).catch(() => { /* grading must never fail or slow a dispatch */ }).finally(() => clearTimeout(rtimer));
+  } catch { /* verdict delivery is best effort */ }
+
   return {
     dispatchId, executionId, templateId,
     status: overallStatus, startedAt, duration_ms: duration,
