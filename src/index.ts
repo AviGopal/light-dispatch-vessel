@@ -162,7 +162,7 @@ async function retireNeverSucceededTemplates(): Promise<void> {
     let total = Infinity;
     while (all.length < total && offset < RETIRE_WINDOW) {
       const res = await fetch(`${ACTIVITY_API}/v2/activities/templates?limit=200&offset=${offset}`, {
-        headers: { ...(API_KEY ? { "Authorization": `Bearer ${API_KEY}` } : {}) },
+        headers: { ...(API_KEY ? { "Authorization": `ApiKey ${API_KEY}` } : {}) },
       });
       if (!res.ok) { console.warn(`[retire-sweep] template listing HTTP ${res.status} at offset ${offset} — sweeping only what was fetched`); break; }
       const page = await res.json() as { templates?: Array<{ id?: string; deprecated?: boolean; retired?: boolean; metrics?: TemplateMetrics }>; total?: number };
