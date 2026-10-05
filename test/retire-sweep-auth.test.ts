@@ -160,3 +160,71 @@ describe("retire sweep criterion is posterior-based: P(success) < 0.05 under Bet
     expect(shouldRetire(DEAD(), 10)).toBe(true);
   });
 });
+
+// ── STRENGTHENED (class, not examples) ───────────────────────────────────────────────────────
+// The four arms above — (1,40) retire; (1,20), (8,32), (20,10) keep — are passed by a patch as
+// narrow as `alpha === 1 && alpha + beta >= 30`. The rule is a property of the whole (alpha, beta)
+// plane, so it is checked here over a grid, through the exported pure `shouldRetire` (it does not
+// depend on the sweep being exported), with every success counter reading ZERO and
+// total_executions far above the min-samples gate — the case where the old count rule and the
+// posterior rule disagree.
+//
+// REFERENCE RULE: retire iff alpha + beta >= 30 AND the posterior predictive probability of
+// success, alpha / (alpha + beta), is below 0.05. Derivation: it is the only reading of
+// "P(success) < 0.05 under Beta(alpha, beta)" consistent with the existing arms. A credible-bound
+// reading (posterior mean + 2 sd < 0.05, or P(p < 0.05) >= 0.95) KEEPS the dead arm (1,40)
+// (mean + 2 sd ~ 0.072; P(p < 0.05) ~ 0.87), which the tests above require to be retired.
+// Grid points whose mean is exactly 0.05 are skipped so strict-vs-inclusive is not tested.
+//
+// MUST-KEEP (folded in from step-3): no arm whose posterior mean is at least 0.05 is retired,
+// whatever its counter reads — (20,10) is one point of that class, not the class.
+// CONTROLS keep the over-broad repair out: every arm the reference retires must still be retired
+// (a never-retire rule fails), and the retired / no-metrics fail-safes hold.
+const RETIRE_POSTERIOR = 0.05;
+const RETIRE_MIN_EVIDENCE = 30;
+const refRetire = (a: number, b: number): boolean => a + b >= RETIRE_MIN_EVIDENCE && a / (a + b) < RETIRE_POSTERIOR;
+
+const ALPHAS = [1, 2, 3, 4, 5, 6, 8, 10, 15, 20];
+const BETAS = [5, 10, 15, 19, 20, 25, 28, 29, 30, 35, 38, 40, 50, 57, 60, 80, 100, 150, 200];
+const GRID: Array<{ a: number; b: number }> = [];
+for (const a of ALPHAS) for (const b of BETAS) if (Math.abs(a / (a + b) - RETIRE_POSTERIOR) > 1e-9) GRID.push({ a, b });
+
+const zeroCounterArm = (a: number, b: number): Template =>
+  arm(`grid-${a}-${b}`, { total_executions: a + b + 100, successful_executions: 0, success_rate: 0, thompson_alpha: a, thompson_beta: b });
+
+function disagreements(points: Array<{ a: number; b: number }>): string[] {
+  return points
+    .filter(({ a, b }) => shouldRetire(zeroCounterArm(a, b), 10) !== refRetire(a, b))
+    .map(({ a, b }) => `(alpha=${a}, beta=${b}) expected ${refRetire(a, b) ? "retire" : "keep"}`);
+}
+
+describe("retire criterion over the (alpha, beta) plane: retire iff alpha+beta >= 30 and alpha/(alpha+beta) < 0.05", () => {
+  it("MUST-FAIL (class): over the grid, with a zero success counter, shouldRetire agrees with the posterior reference rule", () => {
+    expect(typeof shouldRetire).toBe("function");
+    expect(disagreements(GRID)).toEqual([]);
+  });
+
+  it("MUST-KEEP (class): no arm whose posterior mean is at least 0.05 is retired, whatever its success counter reads", () => {
+    expect(typeof shouldRetire).toBe("function");
+    expect(disagreements(GRID.filter(({ a, b }) => a / (a + b) >= RETIRE_POSTERIOR))).toEqual([]);
+  });
+
+  it("MUST-FAIL (boundary): evidence 29 is kept and 30 retired at a low mean; (2,60) retired; (3,40) kept", () => {
+    expect(typeof shouldRetire).toBe("function");
+    const verdict = (a: number, b: number) => (shouldRetire(zeroCounterArm(a, b), 10) ? "retire" : "keep");
+    expect({ "1,28": verdict(1, 28), "1,29": verdict(1, 29), "2,60": verdict(2, 60), "3,40": verdict(3, 40), "20,10": verdict(20, 10) })
+      .toEqual({ "1,28": "keep", "1,29": "retire", "2,60": "retire", "3,40": "keep", "20,10": "keep" });
+  });
+
+  it("CONTROL (class): every grid arm the reference rule retires is retired (a never-retire rule fails)", () => {
+    expect(typeof shouldRetire).toBe("function");
+    expect(disagreements(GRID.filter(({ a, b }) => refRetire(a, b)))).toEqual([]);
+  });
+
+  it("CONTROL: fail-safes hold over the grid — an already-retired arm and an arm with no metrics are never retired", () => {
+    expect(typeof shouldRetire).toBe("function");
+    expect(GRID.filter(({ a, b }) => shouldRetire({ ...zeroCounterArm(a, b), retired: true }, 10))).toEqual([]);
+    expect(shouldRetire({ id: "activity:no-metrics", retired: false }, 10)).toBe(false);
+    expect(shouldRetire({ id: "activity:empty-metrics", retired: false, metrics: { id: "empty-metrics" } } as Template, 10)).toBe(false);
+  });
+});
