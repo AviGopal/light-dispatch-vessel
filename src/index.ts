@@ -32,6 +32,7 @@
 
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { errorCode, resolveWithConnectRetry, taskBudgetMs, taskSignal, type Attempt } from "./task-budget.js";
 
 const PORT = Number(process.env["PORT"] ?? 8280);
 
@@ -272,6 +273,8 @@ interface Template {
     resolver: string;
     config?: Record<string, unknown>;
     output_shape?: string;
+    /** this task's abort budget; absent → the resolver's advertised resolve_timeout_ms (floor 60 s). */
+    timeout_ms?: number;
     validation?: { requiredPatterns?: string[] };
   }>;
 }
@@ -580,6 +583,8 @@ function interpolate(
  * Cached per-process for the lifetime of this dispatch (no proxy registration).
  */
 const vesselCache = new Map<string, string>();
+/** The resolve_timeout_ms each resolve URL's vessel advertised in discovery (the task budget's default). */
+const advertisedTimeoutMs = new Map<string, number>();
 async function findVesselEndpointFor(resolverShape: string): Promise<string | null> {
   if (vesselCache.has(resolverShape)) return vesselCache.get(resolverShape)!;
   // Try bare shape AND namespace-stripped form. Many templates reference
@@ -612,13 +617,14 @@ async function lookupShape(resolverShape: string): Promise<string | null> {
       try { await res.body?.cancel(); } catch { /* swallow */ }
       return null;
     }
-    const data = await res.json() as { content?: { vessels?: Array<{ endpoint?: string; resolve_endpoint?: string }> } };
+    const data = await res.json() as { content?: { vessels?: Array<{ endpoint?: string; resolve_endpoint?: string; resolve_timeout_ms?: number }> } };
     try { await res.body?.cancel(); } catch { /* swallow */ }
     const vessel = data.content?.vessels?.[0];
     if (vessel) {
       const path = vessel.resolve_endpoint ?? "/v2/impulses/resolve";
       const base = vessel.endpoint ?? "";
       const full = path.startsWith("http") ? path : `${base.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+      if (typeof vessel.resolve_timeout_ms === "number") advertisedTimeoutMs.set(full, vessel.resolve_timeout_ms);
       return full;
     }
     return null;
@@ -650,23 +656,22 @@ async function fetchTemplate(templateId: string): Promise<Template | null> {
   }
 }
 
+type Resolved = { ok: boolean; body?: unknown; shape?: string; error?: string; code?: string };
 async function resolveTask(
   endpoint: string,
   resolverShape: string,
   config: Record<string, unknown>,
-): Promise<{ ok: boolean; body?: unknown; shape?: string; error?: string }> {
+  signal: AbortSignal,
+): Promise<Resolved> {
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 60_000);
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth() },
       body: JSON.stringify({
         impulse: { pointer: { type: resolverShape, ...config } },
       }),
-      signal: ctrl.signal,
+      signal,
     });
-    clearTimeout(timer);
     const text = await res.text();
     try { await res.body?.cancel(); } catch { /* swallow */ }
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
@@ -686,23 +691,19 @@ async function resolveTask(
     }
     return { ok: true, body: parsed };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    const code = errorCode(err);
+    return { ok: false, error: (err as Error).message, ...(code ? { code } : {}) };
   }
 }
 
-const TRANSIENT_ERROR_RE = /aborted|socket connection was closed|timed out|ECONNRESET|ECONNREFUSED|fetch failed/i;
+/** One task's resolve under its own budget, retried only on a connect error. */
 async function resolveTaskWithRetry(
   endpoint: string,
   resolverShape: string,
   config: Record<string, unknown>,
-): Promise<{ ok: boolean; body?: unknown; shape?: string; error?: string }> {
-  let last: { ok: boolean; body?: unknown; shape?: string; error?: string } = { ok: false, error: "unreached" };
-  for (let attempt = 0; attempt < 3; attempt++) {
-    last = await resolveTask(endpoint, resolverShape, config);
-    if (last.ok || !TRANSIENT_ERROR_RE.test(last.error ?? "")) return last;
-    if (attempt < 2) await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-  }
-  return last;
+  budgetMs: number,
+): Promise<{ last: Resolved; attempts: Attempt[] }> {
+  return resolveWithConnectRetry((_n) => resolveTask(endpoint, resolverShape, config, taskSignal(budgetMs)));
 }
 async function postTrace(trace: Record<string, unknown>): Promise<void> {
   try {
@@ -785,6 +786,8 @@ async function runDispatch(
   const skippedNonFatalIds = new Set<string>();
   let successCount = 0;
   let failureCount = 0;
+  /** requests actually sent to llm_completion_dispatch (a retried task counts each attempt). */
+  let llmRequests = 0;
   // V31 (2026-06-14): accumulate the second cost dimension — cost-weighted LLM
   // tokens (input + 5×output approximates the output/input price asymmetry without
   // committing to an absolute $ rate). LLM tasks surface usage via the
@@ -832,7 +835,15 @@ async function runDispatch(
       // Fail fast; downstream tasks usually depend on this one.
       break;
     }
-    const resolved = await resolveTaskWithRetry(endpoint, pointerType, config);
+    // The LLM request is attributed to this dispatch's execution (the plane's llm_requests rows join on it).
+    if (pointerType === "llm_completion_dispatch" && config["execution_id"] === undefined) config["execution_id"] = executionId;
+    const budgetMs = taskBudgetMs(task.timeout_ms, advertisedTimeoutMs.get(endpoint));
+    // The task is bounded by its own budget, NOT by the /dispatch caller's connection: a caller may stop waiting on
+    // purpose and expect the dispatch to finish and land its trace (dispatch-latest-auto-draft POSTs fire-and-forget
+    // with a 30 s client timeout). The paid-duplicate cost is cut where it is spent: development-vessel aborts its model
+    // request when THIS budget fires (its request signal), so no abandoned LLM call runs on.
+    const { last: resolved, attempts } = await resolveTaskWithRetry(endpoint, pointerType, config, budgetMs);
+    if (pointerType === "llm_completion_dispatch") llmRequests += attempts.length;
     const reqPatterns = task.validation?.requiredPatterns;
     if (resolved.ok && Array.isArray(reqPatterns) && reqPatterns.length > 0) {
       const bodyStr = typeof resolved.body === "string" ? resolved.body : JSON.stringify(resolved.body ?? "");
@@ -897,6 +908,8 @@ async function runDispatch(
       success: r.status === "success",
       duration_ms: r.duration_ms,
       ...(r.error ? { error: r.error } : {}),
+      budget_ms: budgetMs,
+      attempts,
       input_impulse_ids: [],
       output_impulse_ids: r.shape ? [`impulse:${task.id}`] : [],
     });
@@ -978,6 +991,7 @@ async function runDispatch(
       findings_count: findingsCount,
       finding_hashes: findingHashes,
       cost_tokens: costTokens,
+      llm_requests: llmRequests,
       ...(stateSignatureHash ? { state_signature_hash: stateSignatureHash } : {}),
     },
     parent_execution_id: parentExecutionId,
