@@ -9,8 +9,20 @@
 //
 // The tests that matter are the ones pinning what is KEPT. A rule that retires on missing or
 // thin data would turn a metrics outage into fleet-wide arm destruction.
+//
+// src/index.ts starts the HTTP server, discovery registration and sweep timers at import. Inside
+// the substrate container the live vessel holds port 8280, so a STATIC import fails the whole file
+// with EADDRINUSE whenever this file loads before retire-sweep-auth.test.ts (which sets PORT=0
+// first) in a one-process run: an unnamed load failure the pull-sync gate refuses. The environment
+// is set before a dynamic import, with the SAME values retire-sweep-auth.test.ts sets: whichever
+// file loads the module first fixes those values for both, and that file's mock checks them.
 import { describe, expect, it } from "bun:test";
-import { shouldRetire } from "../src/index.js";
+
+process.env["PORT"] = "0";
+process.env["METABOB_API_KEY"] = "check-first-test-key";
+process.env["ACTIVITY_API_ENDPOINT"] = "http://activity-api.retire-sweep.test";
+process.env["DISCOVERY_ENDPOINT"] = "http://discovery.retire-sweep.test";
+const { shouldRetire } = (await import("../src/index.js")) as { shouldRetire: (t: unknown, minSamples: number) => boolean };
 
 const T = (metrics: Record<string, unknown> | undefined, retired = false) => ({ retired, metrics: metrics as never });
 
