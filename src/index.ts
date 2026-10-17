@@ -30,6 +30,7 @@
  * referenced resolvers' vessels need resolving).
  */
 
+import { informativeReachVerdict } from "./reach-grade.js";
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { errorCode, resolveWithConnectRetry, taskBudgetMs, taskSignal, type Attempt } from "./task-budget.js";
@@ -1006,8 +1007,9 @@ async function runDispatch(
     return Array.isArray(os) ? os.map((s) => String(s)) : [];
   });
   const producedShapes = new Set(outputShapesProduced);
-  const reachVerdict = overallStatus === "success" && declaredShapes.length > 0 && declaredShapes.every((s) => producedShapes.has(s));
-  try {
+  // Posted only when it carries information (reach-grade.ts): a success that cannot be judged stays ungraded.
+  const reachVerdict = informativeReachVerdict(overallStatus, declaredShapes, producedShapes);
+  if (reachVerdict !== null) try {
     const rctrl = new AbortController();
     const rtimer = setTimeout(() => rctrl.abort(), 5_000);
     void fetch(`${ACTIVITY_API}/v2/activities/execution-traces/reach`, {
