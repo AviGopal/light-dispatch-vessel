@@ -31,6 +31,7 @@
  */
 
 import { informativeReachVerdict } from "./reach-grade.js";
+import { noteDeclaredTier, rowTier, stampTierFor, tierStampSummary, type ResolverTier } from "./tier-stamp.js";
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { errorCode, resolveWithConnectRetry, taskBudgetMs, taskSignal, type Attempt } from "./task-budget.js";
@@ -596,14 +597,15 @@ async function findVesselEndpointFor(resolverShape: string): Promise<string | nu
   for (const candidate of candidates) {
     const found = await lookupShape(candidate);
     if (found) {
-      vesselCache.set(resolverShape, found);
-      return found;
+      vesselCache.set(resolverShape, found.endpoint);
+      noteDeclaredTier(resolverShape, found.tier);
+      return found.endpoint;
     }
   }
   return null;
 }
 
-async function lookupShape(resolverShape: string): Promise<string | null> {
+async function lookupShape(resolverShape: string): Promise<{ endpoint: string; tier: ResolverTier | null } | null> {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 5000);
@@ -618,7 +620,7 @@ async function lookupShape(resolverShape: string): Promise<string | null> {
       try { await res.body?.cancel(); } catch { /* swallow */ }
       return null;
     }
-    const data = await res.json() as { content?: { vessels?: Array<{ endpoint?: string; resolve_endpoint?: string; resolve_timeout_ms?: number }> } };
+    const data = await res.json() as { content?: { vessels?: Array<{ endpoint?: string; resolve_endpoint?: string; resolve_timeout_ms?: number; resolver_tier?: string }> } };
     try { await res.body?.cancel(); } catch { /* swallow */ }
     const vessel = data.content?.vessels?.[0];
     if (vessel) {
@@ -626,7 +628,8 @@ async function lookupShape(resolverShape: string): Promise<string | null> {
       const base = vessel.endpoint ?? "";
       const full = path.startsWith("http") ? path : `${base.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
       if (typeof vessel.resolve_timeout_ms === "number") advertisedTimeoutMs.set(full, vessel.resolve_timeout_ms);
-      return full;
+      // The tier the vessel declared for this shape (discovery echoes registration `resolvers[]`); only a known value counts.
+      return { endpoint: full, tier: rowTier(vessel.resolver_tier) };
     }
     return null;
   } catch {
@@ -822,7 +825,7 @@ async function runDispatch(
       taskRecords.push({
         id: task.id,
         resolver_id: task.resolver,
-        resolver_tier: "deterministic",
+        resolver_tier: stampTierFor(task.resolver),
         success: false,
         duration_ms: r.duration_ms,
         error: r.error,
@@ -905,7 +908,7 @@ async function runDispatch(
     taskRecords.push({
       id: task.id,
       resolver_id: task.resolver,
-      resolver_tier: "deterministic",
+      resolver_tier: stampTierFor(task.resolver),
       success: r.status === "success",
       duration_ms: r.duration_ms,
       ...(r.error ? { error: r.error } : {}),
@@ -1052,6 +1055,8 @@ const server = Bun.serve({
         version: VERSION,
         shapes: SHAPES,
         rss_mb: +(process.memoryUsage().rss / 1024 / 1024).toFixed(1),
+        // Declared vs fallback tier stamps on trace tasks since start (the fallback's lift condition reads this).
+        tier_stamps: tierStampSummary(),
       });
     }
 
