@@ -30,7 +30,7 @@
  * referenced resolvers' vessels need resolving).
  */
 
-import { informativeReachVerdict } from "./reach-grade.js";
+import { answerReportsError, informativeReachVerdict } from "./reach-grade.js";
 import { noteDeclaredTier, rowTier, stampTierFor, tierStampSummary, type ResolverTier } from "./tier-stamp.js";
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -295,6 +295,8 @@ interface TaskResult {
   skipped_non_fatal?: true;
   /** the resolver's answer named a budget refusal (failure-type.ts); types the failed run. */
   refusal?: "budget_exhausted";
+  /** the resolver's answer reported an error while it returned a shape (reach-grade.ts); the task is not graded reached. */
+  errored?: true;
 }
 
 interface DispatchOutcome {
@@ -663,7 +665,7 @@ async function fetchTemplate(templateId: string): Promise<Template | null> {
   }
 }
 
-type Resolved = { ok: boolean; body?: unknown; shape?: string; error?: string; code?: string; refusal?: "budget_exhausted"; resolvedFalse?: true };
+type Resolved = { ok: boolean; body?: unknown; shape?: string; error?: string; code?: string; refusal?: "budget_exhausted"; resolvedFalse?: true; errored?: true };
 async function resolveTask(
   endpoint: string,
   resolverShape: string,
@@ -684,6 +686,8 @@ async function resolveTask(
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
     let parsed: unknown;
     try { parsed = JSON.parse(text); } catch { parsed = text; }
+    // An answer that reports its own error while returning a shape is marked, so its shape is not graded reached.
+    if (parsed && typeof parsed === "object" && answerReportsError(parsed)) return { ...answerOutcome(parsed as Record<string, unknown>), errored: true };
     if (parsed && typeof parsed === "object") return answerOutcome(parsed as Record<string, unknown>);
     return { ok: true, body: parsed };
   } catch (err) {
@@ -880,6 +884,7 @@ async function runDispatch(
       error: resolved.error,
       body: resolved.body,
       ...(resolved.refusal ? { refusal: resolved.refusal } : {}),
+      ...(resolved.errored ? { errored: resolved.errored } : {}),
     };
     priorResults.set(task.id, r);
     // V31: harvest LLM token usage surfaced in the task body (llm_completion_dispatch
@@ -999,13 +1004,18 @@ async function runDispatch(
   };
   await postTrace(trace);
 
-  const declaredShapes = (tpl.tasks ?? []).flatMap((t) => {
+  // Each task against its OWN declared alternatives (reach-grade.ts), never the template's union of them.
+  const gradedTasks = (tpl.tasks ?? []).map((t) => {
     const os = (t as unknown as Record<string, unknown>)["outputShapes"];
-    return Array.isArray(os) ? os.map((s) => String(s)) : [];
+    const r = priorResults.get(t.id);
+    return {
+      declared: Array.isArray(os) ? os.map((s) => String(s)) : [],
+      produced: r?.status === "success" ? r.shape : undefined,
+      errored: r?.errored === true,
+    };
   });
-  const producedShapes = new Set(outputShapesProduced);
   // Posted only when it carries information (reach-grade.ts): a success that cannot be judged stays ungraded.
-  const reachVerdict = informativeReachVerdict(overallStatus, declaredShapes, producedShapes);
+  const reachVerdict = informativeReachVerdict(overallStatus, gradedTasks);
   if (reachVerdict !== null) try {
     const rctrl = new AbortController();
     const rtimer = setTimeout(() => rctrl.abort(), 5_000);
