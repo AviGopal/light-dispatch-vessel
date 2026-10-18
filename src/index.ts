@@ -35,6 +35,7 @@ import { noteDeclaredTier, rowTier, stampTierFor, tierStampSummary, type Resolve
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { errorCode, resolveWithConnectRetry, taskBudgetMs, taskSignal, type Attempt } from "./task-budget.js";
+import { answerOutcome, countResolvedFalse, dispatchFailureType, resolvedFalseSummary } from "./failure-type.js";
 
 const PORT = Number(process.env["PORT"] ?? 8280);
 
@@ -292,6 +293,8 @@ interface TaskResult {
   body?: unknown;
   /** true when the task was skipped due to a non-fatal condition (e.g. optional resolver not found) */
   skipped_non_fatal?: true;
+  /** the resolver's answer named a budget refusal (failure-type.ts); types the failed run. */
+  refusal?: "budget_exhausted";
 }
 
 interface DispatchOutcome {
@@ -660,7 +663,7 @@ async function fetchTemplate(templateId: string): Promise<Template | null> {
   }
 }
 
-type Resolved = { ok: boolean; body?: unknown; shape?: string; error?: string; code?: string };
+type Resolved = { ok: boolean; body?: unknown; shape?: string; error?: string; code?: string; refusal?: "budget_exhausted"; resolvedFalse?: true };
 async function resolveTask(
   endpoint: string,
   resolverShape: string,
@@ -681,18 +684,7 @@ async function resolveTask(
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
     let parsed: unknown;
     try { parsed = JSON.parse(text); } catch { parsed = text; }
-    if (parsed && typeof parsed === "object") {
-      const p = parsed as Record<string, unknown>;
-      if (p["success"] === false) {
-        return { ok: false, error: typeof p["error"] === "string" ? p["error"] : "resolver returned success=false" };
-      }
-      const shape = typeof p["shape"] === "string" ? p["shape"] : undefined;
-      if (shape === "structuredError") {
-        const detail = (p["body"] as Record<string, unknown> | undefined)?.["detail"] ?? "structuredError";
-        return { ok: false, shape, error: String(detail).slice(0, 200) };
-      }
-      return { ok: true, body: p["body"] ?? parsed, shape };
-    }
+    if (parsed && typeof parsed === "object") return answerOutcome(parsed as Record<string, unknown>);
     return { ok: true, body: parsed };
   } catch (err) {
     const code = errorCode(err);
@@ -848,6 +840,7 @@ async function runDispatch(
     // request when THIS budget fires (its request signal), so no abandoned LLM call runs on.
     const { last: resolved, attempts } = await resolveTaskWithRetry(endpoint, pointerType, config, budgetMs);
     if (pointerType === "llm_completion_dispatch") llmRequests += attempts.length;
+    countResolvedFalse(task.resolver, resolved);
     const reqPatterns = task.validation?.requiredPatterns;
     if (resolved.ok && Array.isArray(reqPatterns) && reqPatterns.length > 0) {
       const bodyStr = typeof resolved.body === "string" ? resolved.body : JSON.stringify(resolved.body ?? "");
@@ -886,6 +879,7 @@ async function runDispatch(
       shape: resolved.shape,
       error: resolved.error,
       body: resolved.body,
+      ...(resolved.refusal ? { refusal: resolved.refusal } : {}),
     };
     priorResults.set(task.id, r);
     // V31: harvest LLM token usage surfaced in the task body (llm_completion_dispatch
@@ -966,7 +960,7 @@ async function runDispatch(
           ? `${String(failedTask["id"])}: ${String(failedTask["error"] ?? "unknown error")}`.slice(0, 500)
           : undefined;
     const failureReason = String(failedTask?.["error"] ?? "unknown dispatch failure").slice(0, 500);
-    const failureType = /convergent_validity|structuredError|validation|verifier|rejected/i.test(failureReason) ? "verifier_negative" : "cascading";
+    const failureType = dispatchFailureType(failureReason, failedTask ? priorResults.get(String(failedTask["id"]))?.refusal : undefined);
     const failure_mode = overallStatus === "success" ? null : { type: failureType, reason: failureReason, context: { task_id: failedTask?.["id"] ?? null, resolver_id: failedTask?.["resolver_id"] ?? null, dispatch_id: dispatchId, template_id: templateId } };
         const trace = {
     id: dispatchId,
@@ -1057,6 +1051,8 @@ const server = Bun.serve({
         rss_mb: +(process.memoryUsage().rss / 1024 / 1024).toFixed(1),
         // Declared vs fallback tier stamps on trace tasks since start (the fallback's lift condition reads this).
         tier_stamps: tierStampSummary(),
+        // Tasks whose resolver answered resolved:false since start, by resolver (all but budget refusals still succeed).
+        resolved_false_answers: resolvedFalseSummary(),
       });
     }
 
