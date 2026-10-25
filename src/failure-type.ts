@@ -50,12 +50,6 @@ export function answerOutcome(p: Record<string, unknown>): AnswerOutcome {
   if (p["resolved"] === false && p["dispatch_budget_exhausted"] === true) {
     return { ok: false, shape, error: (typeof p["error"] === "string" ? p["error"] : "dispatch budget exhausted").slice(0, 200), ...r };
   }
-  // Instrument-first broadening: treat the degenerate case `resolved:false` with an explicitly null body
-  // as a failure (non-result). All other resolved:false answers remain successes exactly as before.
-  // This keeps parent controls stable while the /health count is gathered.
-  if (p["resolved"] === false && p["body"] === null) {
-    return { ok: false, shape, error: "resolver returned resolved:false", ...r };
-  }
   return { ok: true, body: p["body"] ?? p, shape, ...r };
 }
 
