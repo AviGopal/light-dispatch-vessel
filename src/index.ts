@@ -31,6 +31,7 @@
  */
 
 import { answerReportsError, informativeReachVerdict } from "./reach-grade.js";
+import { stampProducer } from "./producer-stamp.js";
 import { noteDeclaredTier, rowTier, stampTierFor, tierStampSummary, type ResolverTier } from "./tier-stamp.js";
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -837,6 +838,8 @@ async function runDispatch(
     }
     // The LLM request is attributed to this dispatch's execution (the plane's llm_requests rows join on it).
     if (pointerType === "llm_completion_dispatch" && config["execution_id"] === undefined) config["execution_id"] = executionId;
+    // Every task names its producing execution and template (producer-stamp.ts), so what it files can be credited back.
+    stampProducer(config, { executionId, templateId });
     const budgetMs = taskBudgetMs(task.timeout_ms, advertisedTimeoutMs.get(endpoint));
     // The task is bounded by its own budget, NOT by the /dispatch caller's connection: a caller may stop waiting on
     // purpose and expect the dispatch to finish and land its trace (dispatch-latest-auto-draft POSTs fire-and-forget
