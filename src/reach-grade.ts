@@ -33,6 +33,20 @@ export interface GradedTask {
   errored?: boolean;
 }
 
+/**
+ * A TICK THAT FILES GAPS IS NOT REACHED BECAUSE IT RAN (findings agf_hrgaf1yd89kr / agf_zuaa6xsh4b28, "detectors scored by
+ * consumption"). A template whose declared outputs include `substrateGap` is a detector: what it is worth is what its gaps
+ * led to, which only the gap's consumer knows (a landing, a falsifier, an expiry, a rejection), long after the run. Graded
+ * at run end it was reached on ~every run, so its posterior said "it ran", and every such row was retention-protected as
+ * graded evidence. Its successful run now posts NO verdict: the trace stays ungraded (classifyReach's own definition of a
+ * success with no reach tag), and development-vessel's gap outcome credit grades the producer when a gap it filed settles.
+ * A failed run is still graded false: a crash is the tick's own failure, not a consumer's verdict.
+ * The decision reads the template's declared contract, never a name list.
+ */
+export function reachDecidedByConsumption(templateOutputShapes: readonly string[] | undefined): boolean {
+  return Array.isArray(templateOutputShapes) && templateOutputShapes.includes("substrateGap");
+}
+
 export function informativeReachVerdict(overallStatus: "success" | "failure", tasks: readonly GradedTask[]): boolean | null {
   if (overallStatus === "failure") return false;
   const judged = tasks.filter((t) => t.declared.length > 0);

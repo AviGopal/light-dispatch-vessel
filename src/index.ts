@@ -30,7 +30,7 @@
  * referenced resolvers' vessels need resolving).
  */
 
-import { answerReportsError, informativeReachVerdict } from "./reach-grade.js";
+import { answerReportsError, informativeReachVerdict, reachDecidedByConsumption } from "./reach-grade.js";
 import { stampProducer } from "./producer-stamp.js";
 import { noteDeclaredTier, rowTier, stampTierFor, tierStampSummary, type ResolverTier } from "./tier-stamp.js";
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
@@ -963,6 +963,7 @@ async function runDispatch(
   // explicit success bool AND status:"completed" on the success path so the
   // downstream row's success/status fields match light-dispatch's own view of
   // the trace. (Bootstrap 3.)
+  const reachByConsumption = reachDecidedByConsumption(tpl.output_shapes);
   const failedTask = taskRecords.find((t) => t["success"] === false && !t["skipped_non_fatal"]);
     const failedTaskError = failedTask
           ? `${String(failedTask["id"])}: ${String(failedTask["error"] ?? "unknown error")}`.slice(0, 500)
@@ -998,6 +999,7 @@ async function runDispatch(
       finding_hashes: findingHashes,
       cost_tokens: costTokens,
       llm_requests: llmRequests,
+      ...(reachByConsumption && overallStatus === "success" ? { reach_decided_by: "consumption" } : {}),
       ...(stateSignatureHash ? { state_signature_hash: stateSignatureHash } : {}),
     },
     parent_execution_id: parentExecutionId,
@@ -1019,7 +1021,9 @@ async function runDispatch(
   });
   // Posted only when it carries information (reach-grade.ts): a success that cannot be judged stays ungraded.
   const reachVerdict = informativeReachVerdict(overallStatus, gradedTasks);
-  if (reachVerdict !== null) try {
+  // A gap-filing tick's success is graded by what its gaps led to, not here (reach-grade.ts reachDecidedByConsumption).
+  if (reachVerdict !== null && overallStatus === "success" && reachByConsumption) console.log(`[light-dispatch-vessel] ${executionId} (${templateId}): no run-end reach verdict; this template files gaps, so its reach is decided by consumption`);
+  else if (reachVerdict !== null) try {
     const rctrl = new AbortController();
     const rtimer = setTimeout(() => rctrl.abort(), 5_000);
     void fetch(`${ACTIVITY_API}/v2/activities/execution-traces/reach`, {
