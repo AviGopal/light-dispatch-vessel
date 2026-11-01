@@ -97,7 +97,7 @@ describe("[WIRING] index.ts uses the budget, the code rule, the caller's signal,
     expect(src).not.toContain("setTimeout(() => ctrl.abort(), 60_000)");
   });
   it("the budget comes from the task and the advertised timeout; the caller's connection does NOT cancel the dispatch", () => {
-    expect(src).toContain("const budgetMs = taskBudgetMs(task.timeout_ms, advertisedTimeoutMs.get(endpoint));");
+    expect(src).toContain("const { ms: budgetMs, source: budgetSource } = await taskBudgetAtUse(task.timeout_ms, advertisedTimeoutMs.get(endpoint), { resolver: task.resolver, shape: pointerType });");
     expect(src).toContain("if (typeof vessel.resolve_timeout_ms === \"number\") advertisedTimeoutMs.set(full, vessel.resolve_timeout_ms);");
     // HELD-OUT: a fire-and-forget caller (dispatch-latest-auto-draft: 30 s client timeout) still gets its trace landed.
     expect(src).not.toContain("req.signal");
@@ -107,5 +107,10 @@ describe("[WIRING] index.ts uses the budget, the code rule, the caller's signal,
     expect(src).toContain("budget_ms: budgetMs,\n      attempts,");
     expect(src).toContain("llm_requests: llmRequests,");
     expect(src).toContain('if (pointerType === "llm_completion_dispatch" && config["execution_id"] === undefined) config["execution_id"] = executionId;');
+  });
+  it("[MUST-FAIL] the budget's floor is read from the shaped policy taskBudgetPolicy at use time, and the trace names the rule that set it", () => {
+    const lib = readFileSync(new URL("../src/task-budget.ts", import.meta.url), "utf8");
+    expect(lib).toContain('"/workspace/git/super-repo/policies/taskBudgetPolicy.json"');
+    expect(src).toContain("budget_source: budgetSource,\n      budget_ms: budgetMs,\n      attempts,");
   });
 });

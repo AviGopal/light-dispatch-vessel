@@ -35,7 +35,7 @@ import { stampProducer } from "./producer-stamp.js";
 import { noteDeclaredTier, rowTier, stampTierFor, tierStampSummary, type ResolverTier } from "./tier-stamp.js";
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { errorCode, resolveWithConnectRetry, taskBudgetMs, taskSignal, type Attempt } from "./task-budget.js";
+import { budgetAbortLine, errorCode, resolveWithConnectRetry, taskBudgetAtUse, taskSignal, type Attempt } from "./task-budget.js";
 import { answerOutcome, countResolvedFalse, dispatchFailureType, resolvedFalseSummary } from "./failure-type.js";
 
 const PORT = Number(process.env["PORT"] ?? 8280);
@@ -840,13 +840,17 @@ async function runDispatch(
     if (pointerType === "llm_completion_dispatch" && config["execution_id"] === undefined) config["execution_id"] = executionId;
     // Every task names its producing execution and template (producer-stamp.ts), so what it files can be credited back.
     stampProducer(config, { executionId, templateId });
-    const budgetMs = taskBudgetMs(task.timeout_ms, advertisedTimeoutMs.get(endpoint));
+    // The floor is the shaped policy taskBudgetPolicy, read now (its entry for this resolver, else this shape, else its
+    // default); the trace records which rule set the budget.
+    const { ms: budgetMs, source: budgetSource } = await taskBudgetAtUse(task.timeout_ms, advertisedTimeoutMs.get(endpoint), { resolver: task.resolver, shape: pointerType });
     // The task is bounded by its own budget, NOT by the /dispatch caller's connection: a caller may stop waiting on
     // purpose and expect the dispatch to finish and land its trace (dispatch-latest-auto-draft POSTs fire-and-forget
     // with a 30 s client timeout). The paid-duplicate cost is cut where it is spent: development-vessel aborts its model
     // request when THIS budget fires (its request signal), so no abandoned LLM call runs on.
     const { last: resolved, attempts } = await resolveTaskWithRetry(endpoint, pointerType, config, budgetMs);
     if (pointerType === "llm_completion_dispatch") llmRequests += attempts.length;
+    const abortLine = budgetAbortLine(resolved.code, { resolver: task.resolver, template: templateId, task: task.id, budget_ms: budgetMs, source: budgetSource, elapsed_ms: Date.now() - tTask0 });
+    if (abortLine) console.warn(abortLine);
     countResolvedFalse(task.resolver, resolved);
     const reqPatterns = task.validation?.requiredPatterns;
     if (resolved.ok && Array.isArray(reqPatterns) && reqPatterns.length > 0) {
@@ -914,6 +918,7 @@ async function runDispatch(
       success: r.status === "success",
       duration_ms: r.duration_ms,
       ...(r.error ? { error: r.error } : {}),
+      budget_source: budgetSource,
       budget_ms: budgetMs,
       attempts,
       input_impulse_ids: [],
