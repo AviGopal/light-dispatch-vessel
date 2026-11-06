@@ -21,9 +21,11 @@ async function run(policy: unknown, name: string): Promise<{ ms: number; source:
 }
 
 describe("taskBudgetPolicy key that matches no dispatched resolver", () => {
-  test("a dead resolver key is noted, naming the key", async () => {
-    const { logs } = await run({ resolvers: { no_such_resolver: 600000 } }, "dead.json");
-    expect(logs.some((m) => m.includes(NOTE) && m.includes("no_such_resolver"))).toBe(true);
+  test("dead resolver key: default budget is kept and the ignored key is noted", async () => {
+    const dead = await run({ resolvers: { no_such_resolver: 600000 } }, "dead.json");
+    expect(dead.ms).toBe(Number(mod.TASK_BUDGET_FLOOR_MS));
+    expect(dead.source).toBe("default");
+    expect(dead.logs.some((m) => m.includes(NOTE) && m.includes("no_such_resolver"))).toBe(true);
   });
 
   test("control: matching keys and an absent policy log no such note; budgets unchanged", async () => {
